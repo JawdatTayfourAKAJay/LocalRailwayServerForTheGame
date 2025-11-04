@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import uvicorn
 import os
 
@@ -24,6 +25,11 @@ COMMAND_COSTS = {
     7: 500
 }
 
+class ButtonRequest(BaseModel):
+    user_points: int = 999999
+    user_id: str = None
+    username: str = None
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
@@ -42,18 +48,19 @@ async def websocket_endpoint(ws: WebSocket):
             connected_clients.remove(ws)
 
 @app.post("/button/{button_id}")
-async def button_pressed(button_id: int, user_points: int = 999999):
+async def button_pressed(button_id: int, request: ButtonRequest):
     cost = COMMAND_COSTS.get(button_id, 0)
     
-    if user_points < cost:
-        return {"status": "insufficient_points", "required": cost, "has": user_points}
+    if request.user_points < cost:
+        return {"status": "insufficient_points", "required": cost, "has": request.user_points}
     
-    print(f"✓ Button {button_id} pressed (Cost: {cost}g)")
+    print(f"✓ Button {button_id} pressed by {request.username} (User ID: {request.user_id}, Cost: {cost}g)")
     
     disconnected = []
     for client in connected_clients:
         try:
-            await client.send_text(f"button:{button_id}")
+            # Send command with username to Godot
+            await client.send_text(f"button:{button_id}:user:{request.username or 'Guest'}")
             print(f"  → Sent to Godot client")
         except:
             disconnected.append(client)
@@ -65,6 +72,7 @@ async def button_pressed(button_id: int, user_points: int = 999999):
         "status": "sent", 
         "button": button_id, 
         "cost": cost,
+        "username": request.username,
         "clients": len(connected_clients)
     }
 
