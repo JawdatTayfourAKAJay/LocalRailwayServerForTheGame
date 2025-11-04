@@ -1,6 +1,7 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import uvicorn
 import os
 
@@ -27,8 +28,8 @@ COMMAND_COSTS = {
 
 class ButtonRequest(BaseModel):
     user_points: int = 999999
-    user_id: str = None
-    username: str = None
+    user_id: Optional[str] = None
+    username: Optional[str] = None
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -48,19 +49,32 @@ async def websocket_endpoint(ws: WebSocket):
             connected_clients.remove(ws)
 
 @app.post("/button/{button_id}")
-async def button_pressed(button_id: int, request: ButtonRequest):
+async def button_pressed(
+    button_id: int, 
+    request: Optional[ButtonRequest] = None,
+    user_points: int = Query(999999)
+):
+    # Handle both JSON body and query params
+    if request:
+        points = request.user_points
+        username = request.username or "unknown"
+        user_id = request.user_id
+    else:
+        points = user_points
+        username = "unknown"
+        user_id = None
+    
     cost = COMMAND_COSTS.get(button_id, 0)
     
-    if request.user_points < cost:
-        return {"status": "insufficient_points", "required": cost, "has": request.user_points}
+    if points < cost:
+        return {"status": "insufficient_points", "required": cost, "has": points}
     
-    print(f"✓ Button {button_id} pressed by {request.username} (User ID: {request.user_id}, Cost: {cost}g)")
+    print(f"✓ Button {button_id} pressed by {username} (Cost: {cost}g)")
     
     disconnected = []
     for client in connected_clients:
         try:
-            # Send command with username to Godot
-            await client.send_text(f"button:{button_id}:user:{request.username or 'Guest'}")
+            await client.send_text(f"button:{button_id}:user:{username}")
             print(f"  → Sent to Godot client")
         except:
             disconnected.append(client)
@@ -72,7 +86,7 @@ async def button_pressed(button_id: int, request: ButtonRequest):
         "status": "sent", 
         "button": button_id, 
         "cost": cost,
-        "username": request.username,
+        "username": username,
         "clients": len(connected_clients)
     }
 
