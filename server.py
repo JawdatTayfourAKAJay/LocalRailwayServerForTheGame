@@ -1,11 +1,12 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict
 import uvicorn
 import os
 import hmac
 import hashlib
+import json
 
 app = FastAPI()
 
@@ -18,6 +19,7 @@ app.add_middleware(
 
 connected_clients = []
 fish_registry = {}
+current_fish_data = []  # Store current fish data from Godot
 
 # Twitch EventSub secret (you'll set this when registering)
 TWITCH_EVENTSUB_SECRET = os.environ.get("TWITCH_EVENTSUB_SECRET", "your_secret_here")
@@ -59,12 +61,26 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     connected_clients.append(ws)
     print("✓ Godot client connected via WebSocket")
+    
+    # Request initial fish data
+    await ws.send_text("request:fish_list")
+    
     try:
         while True:
             data = await ws.receive_text()
             print(f"Received from Godot: {data}")
             
-            if data.startswith("fish_spawned:"):
+            # Handle fish data updates from Godot
+            if data.startswith("fish_data:"):
+                fish_json = data.replace("fish_data:", "", 1)
+                try:
+                    global current_fish_data
+                    current_fish_data = json.loads(fish_json)
+                    print(f"Updated fish data: {len(current_fish_data)} fish")
+                except json.JSONDecodeError:
+                    print("Failed to parse fish data")
+            
+            elif data.startswith("fish_spawned:"):
                 parts = data.split(":")
                 if len(parts) >= 2:
                     fish_owner = parts[1]
@@ -80,6 +96,38 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         if ws in connected_clients:
             connected_clients.remove(ws)
+
+@app.get("/fish")
+async def get_fish():
+    """Get available fish for feeding (excluding immortal starter fish)"""
+    # Filter out starter fish and dead fish
+    starter_names = ["Jay", "Kati", "Manu"]
+    
+    # If we have real fish data from Godot, use it
+    if current_fish_data:
+        available_fish = [
+            fish for fish in current_fish_data 
+            if fish.get("name") not in starter_names and fish.get("health", 0) > 0
+        ]
+        return {
+            "success": True,
+            "fish": available_fish,
+            "count": len(available_fish)
+        }
+    
+    # Otherwise return dummy data for testing
+    dummy_fish = [
+        {"index": 0, "name": "Bubbles", "species": "Goldfish", "health": 75, "max_health": 100},
+        {"index": 1, "name": "Finn", "species": "Betta", "health": 50, "max_health": 100},
+        {"index": 2, "name": "Coral", "species": "Clownfish", "health": 25, "max_health": 100},
+        {"index": 3, "name": "Marina", "species": "Angelfish", "health": 90, "max_health": 100}
+    ]
+    
+    return {
+        "success": True,
+        "fish": dummy_fish,
+        "count": len(dummy_fish)
+    }
 
 @app.post("/button/{button_id}")
 async def button_pressed(
@@ -105,13 +153,39 @@ async def button_pressed(
     
     print(f"✓ Button {button_id} pressed by {username} (Cost: {cost}g)")
     
+    # Handle button 2 (Feed A Fish) with specific fish index
+    if button_id == 2 and fish_index is not None:
+        disconnected = []
+        for client in connected_clients:
+            try:
+                await client.send_text(f"feed_fish:{fish_index}")
+                print(f"  → Sent feed fish command for index {fish_index}")
+            except:
+                disconnected.append(client)
+        
+        for client in disconnected:
+            connected_clients.remove(client)
+            
+        # Get fish name if available
+        fish_name = "fish"
+        if fish_index < len(current_fish_data):
+            fish_name = current_fish_data[fish_index].get("name", "fish")
+        
+        return {
+            "status": "sent",
+            "button": button_id,
+            "cost": cost,
+            "username": username,
+            "fish_name": fish_name,
+            "fish_index": fish_index,
+            "clients": len(connected_clients)
+        }
+    
+    # Handle other buttons normally
     disconnected = []
     for client in connected_clients:
         try:
-            if fish_index is not None:
-                await client.send_text(f"button:{button_id}:user:{username}:fish:{fish_index}")
-            else:
-                await client.send_text(f"button:{button_id}:user:{username}")
+            await client.send_text(f"button:{button_id}:user:{username}")
             print(f"  → Sent to Godot client")
         except:
             disconnected.append(client)
@@ -119,6 +193,7 @@ async def button_pressed(
     for client in disconnected:
         connected_clients.remove(client)
     
+    # Handle button 6 (Spawn Fish) - register in fish registry
     if button_id == 6:
         if username not in fish_registry:
             fish_registry[username] = []
@@ -205,23 +280,16 @@ async def has_fish(username: str):
 
 @app.get("/fish-list")
 async def get_fish_list():
-    for client in connected_clients:
-        try:
-            await client.send_text("request:fish_list")
-        except:
-            pass
-    
-    return {
-        "fish": [
-            {"name": "Jay", "species": "Betta"},
-            {"name": "Kati", "species": "Betta"},
-            {"name": "Manu", "species": "Betta"}
-        ]
-    }
+    """Legacy endpoint - redirects to /fish"""
+    return await get_fish()
 
 @app.get("/")
 async def root():
-    return {"status": "server running", "connected_clients": len(connected_clients)}
+    return {
+        "status": "server running",
+        "connected_clients": len(connected_clients),
+        "fish_count": len(current_fish_data)
+    }
 
 @app.get("/commands")
 async def get_commands():
