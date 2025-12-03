@@ -247,7 +247,6 @@ async def eventsub_callback(
     # Handle verification challenge
     if twitch_eventsub_message_type == "webhook_callback_verification":
         print("✓ Webhook verification request received")
-        from fastapi.responses import PlainTextResponse
         return PlainTextResponse(content=data["challenge"])
     
     # Handle notification events
