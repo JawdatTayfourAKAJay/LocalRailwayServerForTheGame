@@ -7,7 +7,7 @@ import os
 import hmac
 import hashlib
 import json
-
+from fastapi.responses import PlainTextResponse
 # Map
 REWARD_ID_TO_BUTTON = {
     "08f530ad-0b8e-43fa-91da-05861241db81": 3,  # Clean Tank
@@ -247,7 +247,8 @@ async def eventsub_callback(
     # Handle verification challenge
     if twitch_eventsub_message_type == "webhook_callback_verification":
         print("✓ Webhook verification request received")
-        return {"challenge": data["challenge"]}
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(content=data["challenge"])
     
     # Handle notification events
     elif twitch_eventsub_message_type == "notification":
