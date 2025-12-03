@@ -8,6 +8,19 @@ import hmac
 import hashlib
 import json
 
+# Map
+REWARD_ID_TO_BUTTON = {
+    "08f530ad-0b8e-43fa-91da-05861241db81": 3,  # Clean Tank
+    "21b5323c-18d6-4803-85eb-8ab6acf3a271": 2,  # Feed a Fish
+    "301390c0-79da-45a1-a4fb-f15940565833": 4,  # Progress Tank
+    "7d48717b-f8cf-42a3-ab07-f17111e07d63": 5,  # Feed All Fish
+    "7f9b79f4-6492-4ae6-af0c-195c8da6670e": 7,  # Power Up My Fish
+    "e785a1c1-4e7c-4b07-afc3-c7b717e23a41": 6,  # Spawn My Fish
+    "f2d2e625-97a1-42db-8bb0-7ce385599ada": 8,  # Change My Fish (new)
+    "f7a729bd-8c96-4d02-9239-df4af21621f2": 1,  # Feed My Fish
+}
+
+
 app = FastAPI()
 
 app.add_middleware(
@@ -25,13 +38,14 @@ current_fish_data = []  # Store current fish data from Godot
 TWITCH_EVENTSUB_SECRET = os.environ.get("TWITCH_EVENTSUB_SECRET", "your_secret_here")
 
 COMMAND_COSTS = {
-    1: 100,
-    2: 100,
-    3: 50,
-    4: 100,
-    5: 250,
-    6: 10000,
-    7: 500
+    1: 100,    # Feed My Fish
+    2: 100,    # Feed a Fish
+    3: 50,     # Clean Tank
+    4: 100,    # Progress Tank
+    5: 250,    # Feed All Fish
+    6: 2500,   # Spawn My Fish (updated)
+    7: 500,    # Power Up My Fish
+    8: 300     # Change My Fish (new)
 }
 
 SUBSCRIPTION_HP = {
@@ -235,7 +249,7 @@ async def eventsub_callback(
         print("✓ Webhook verification request received")
         return {"challenge": data["challenge"]}
     
-    # Handle subscription event
+    # Handle notification events
     elif twitch_eventsub_message_type == "notification":
         event_type = data.get("subscription", {}).get("type")
         
@@ -270,6 +284,61 @@ async def eventsub_callback(
             if username not in fish_registry:
                 fish_registry[username] = []
             fish_registry[username].append(username)
+        
+        elif event_type == "channel.channel_points_custom_reward_redemption.add":
+            event_data = data["event"]
+            reward_id = event_data["reward"]["id"]
+            username = event_data["user_name"]
+            user_id = event_data["user_id"]
+            user_input = event_data.get("user_input", "")  # For "Feed a Fish" fish selection
+            
+            # Map reward to button command
+            button_id = REWARD_ID_TO_BUTTON.get(reward_id)
+            
+            if not button_id:
+                print(f"⚠️ Unknown reward redeemed: {reward_id}")
+                return {"status": "unknown_reward"}
+            
+            print(f"✓ {username} redeemed reward (Button {button_id})")
+            
+            # Handle "Feed a Fish" - needs fish index from user input
+            if button_id == 2:
+                try:
+                    fish_index = int(user_input)
+                except:
+                    print(f"⚠️ Invalid fish index: {user_input}")
+                    return {"status": "invalid_input"}
+                
+                # Send feed command
+                disconnected = []
+                for client in connected_clients:
+                    try:
+                        await client.send_text(f"feed_fish:{fish_index}")
+                    except:
+                        disconnected.append(client)
+                
+                for client in disconnected:
+                    connected_clients.remove(client)
+            
+            else:
+                # Send regular button command
+                disconnected = []
+                for client in connected_clients:
+                    try:
+                        await client.send_text(f"button:{button_id}:user:{username}")
+                    except:
+                        disconnected.append(client)
+                
+                for client in disconnected:
+                    connected_clients.remove(client)
+            
+            # Handle special cases
+            if button_id == 6:  # Spawn My Fish
+                if username not in fish_registry:
+                    fish_registry[username] = []
+                fish_registry[username].append(username)
+            
+            return {"status": "executed", "button": button_id, "username": username}
     
     return {"status": "ok"}
 
