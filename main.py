@@ -8,6 +8,18 @@ import hmac
 import hashlib
 import json
 from fastapi.responses import PlainTextResponse
+import time
+import requests
+
+# Twitch API credentials
+CLIENT_ID = os.environ.get("TWITCH_CLIENT_ID", "giq1a0a7ncmdcl4xx9ilyfdoyyu1xr")
+CLIENT_SECRET = os.environ.get("TWITCH_CLIENT_SECRET", "yg4rardum7fsyaectewpx6aasculc2")
+BROADCASTER_ID = os.environ.get("BROADCASTER_ID", "1259060048")
+redemption_tracker: Dict[str, Dict[str, str]] = {}
+twitch_oauth_token = None
+token_expiry = 0
+
+
 # Map
 REWARD_ID_TO_BUTTON = {
     "08f530ad-0b8e-43fa-91da-05861241db81": 3,  # Clean Tank
@@ -60,6 +72,106 @@ class ButtonRequest(BaseModel):
     username: Optional[str] = None
     fish_index: Optional[int] = None
 
+
+def get_twitch_oauth_token():
+    """Get or refresh Twitch OAuth token"""
+    global twitch_oauth_token, token_expiry
+    
+    # Return cached token if still valid
+    current_time = time.time()
+    if twitch_oauth_token and current_time < token_expiry:
+        return twitch_oauth_token
+    
+    print("🔑 Getting new Twitch OAuth token...")
+    
+    response = requests.post(
+        "https://id.twitch.tv/oauth2/token",
+        params={
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "grant_type": "client_credentials"
+        }
+    )
+    
+    if response.status_code == 200:
+        data = response.json()
+        twitch_oauth_token = data["access_token"]
+        # Set expiry to 1 hour before actual expiry for safety
+        token_expiry = current_time + data.get("expires_in", 3600) - 3600
+        print("✓ Got OAuth token")
+        return twitch_oauth_token
+    else:
+        print(f"❌ Failed to get OAuth token: {response.status_code}")
+        print(response.text)
+        return None
+
+async def refund_channel_points(username: str, reward_id: str, redemption_id: str):
+    """Refund channel points by canceling the redemption"""
+    token = get_twitch_oauth_token()
+    if not token:
+        print("❌ Cannot refund - no OAuth token")
+        return False
+    
+    headers = {
+        "Client-ID": CLIENT_ID,
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    # Update redemption status to CANCELED (refunds the points)
+    url = f"https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions"
+    params = {
+        "broadcaster_id": BROADCASTER_ID,
+        "reward_id": reward_id,
+        "id": redemption_id
+    }
+    
+    payload = {
+        "status": "CANCELED"
+    }
+    
+    response = requests.patch(url, headers=headers, params=params, json=payload)
+    
+    if response.status_code == 200:
+        print(f"✓ Refunded channel points for {username} (Reward: {reward_id})")
+        return True
+    else:
+        print(f"❌ Failed to refund for {username}: {response.status_code}")
+        print(response.text)
+        return False
+    
+
+async def send_twitch_chat_message(message: str):
+    """Send a message to Twitch chat"""
+    token = get_twitch_oauth_token()
+    if not token:
+        print("❌ Cannot send chat message - no OAuth token")
+        return False
+    
+    headers = {
+        "Client-ID": CLIENT_ID,
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    url = "https://api.twitch.tv/helix/chat/messages"
+    
+    payload = {
+        "broadcaster_id": BROADCASTER_ID,
+        "sender_id": BROADCASTER_ID,  # Sending as broadcaster
+        "message": message
+    }
+    
+    response = requests.post(url, headers=headers, json=payload)
+    
+    if response.status_code == 200:
+        print(f"✓ Sent chat message: {message}")
+        return True
+    else:
+        print(f"❌ Failed to send chat message: {response.status_code}")
+        print(response.text)
+        return False
+
 def verify_twitch_signature(request_body: bytes, signature: str, message_id: str, timestamp: str) -> bool:
     """Verify Twitch webhook signature"""
     hmac_message = message_id.encode() + timestamp.encode() + request_body
@@ -102,6 +214,32 @@ async def websocket_endpoint(ws: WebSocket):
                         fish_registry[fish_owner] = []
                     fish_registry[fish_owner].append(fish_owner)
                     print(f"Registered fish for {fish_owner}")
+            
+            # Handle refund requests
+            elif data.startswith("refund:"):
+                parts = data.split(":")
+                if len(parts) >= 3:
+                    username = parts[1]
+                    reward_id = parts[2]
+                    
+                    # Look up redemption ID from tracker
+                    if username in redemption_tracker and reward_id in redemption_tracker[username]:
+                        redemption_id = redemption_tracker[username][reward_id]
+                        success = await refund_channel_points(username, reward_id, redemption_id)
+                        
+                        if success:
+                            # Clean up from tracker
+                            del redemption_tracker[username][reward_id]
+                            print(f"✓ Refund processed for {username}")
+                        else:
+                            print(f"⚠️ Refund failed for {username}")
+                    else:
+                        print(f"⚠️ No redemption ID found for {username}, reward {reward_id}")
+            
+            # NEW - Handle chat messages
+            elif data.startswith("chat_message:"):
+                message = data.replace("chat_message:", "", 1)
+                await send_twitch_chat_message(message)
                 
     except WebSocketDisconnect:
         print("Client disconnected normally")
@@ -110,7 +248,7 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         if ws in connected_clients:
             connected_clients.remove(ws)
-
+    
 @app.get("/fish")
 async def get_fish():
     """Get available fish for feeding (excluding immortal starter fish)"""
@@ -288,9 +426,15 @@ async def eventsub_callback(
         elif event_type == "channel.channel_points_custom_reward_redemption.add":
             event_data = data["event"]
             reward_id = event_data["reward"]["id"]
+            redemption_id = event_data["id"]  # Get redemption ID for refunds
             username = event_data["user_name"]
             user_id = event_data["user_id"]
-            user_input = event_data.get("user_input", "")  # For "Feed a Fish" fish selection
+            user_input = event_data.get("user_input", "")
+            
+            # Track redemption ID for potential refunds
+            if username not in redemption_tracker:
+                redemption_tracker[username] = {}
+            redemption_tracker[username][reward_id] = redemption_id
             
             # Map reward to button command
             button_id = REWARD_ID_TO_BUTTON.get(reward_id)
@@ -301,19 +445,20 @@ async def eventsub_callback(
             
             print(f"✓ {username} redeemed reward (Button {button_id})")
             
-            # Handle "Feed a Fish" - needs fish index from user input
+            # Handle "Feed a Fish" - needs fish NAME from user input
             if button_id == 2:
-                try:
-                    fish_index = int(user_input)
-                except:
-                    print(f"⚠️ Invalid fish index: {user_input}")
+                fish_name = user_input.strip()
+                
+                if not fish_name:
+                    print(f"⚠️ No fish name provided by {username}")
                     return {"status": "invalid_input"}
                 
-                # Send feed command
+                # Send feed command with fish name and reward ID for refunds
                 disconnected = []
                 for client in connected_clients:
                     try:
-                        await client.send_text(f"feed_fish:{fish_index}")
+                        await client.send_text(f"button:{button_id}:user:{username}:fish_name:{fish_name}:reward:{reward_id}")
+                        print(f"  → Sent feed fish '{fish_name}' command")
                     except:
                         disconnected.append(client)
                 
@@ -321,11 +466,12 @@ async def eventsub_callback(
                     connected_clients.remove(client)
             
             else:
-                # Send regular button command
+                # Send regular button command WITH reward ID
                 disconnected = []
                 for client in connected_clients:
                     try:
-                        await client.send_text(f"button:{button_id}:user:{username}")
+                        await client.send_text(f"button:{button_id}:user:{username}:reward:{reward_id}")
+                        print(f"  → Sent to Godot client")
                     except:
                         disconnected.append(client)
                 
@@ -377,3 +523,5 @@ async def get_commands():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
