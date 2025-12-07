@@ -1,4 +1,4 @@
-fastap
+fastapi
 uvicorn
 pydantic
 requests
