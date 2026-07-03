@@ -77,9 +77,33 @@ class ButtonRequest(BaseModel):
 
 class GameEvent(BaseModel):
     api_key: str
-    steam_id: str        # raw Steam ID — hashed server-side, never stored
+    steam_id: str
     achievement: str
     day: int
+    # richer fields the game already sends
+    schema_version: Optional[int] = None
+    slot: Optional[str] = None
+    event_name: Optional[str] = None
+    timestamp_unix: Optional[int] = None
+    # session fields
+    session_start_unix: Optional[int] = None
+    start_screen: Optional[str] = None
+    total_active_playtime_seconds: Optional[float] = None
+    total_active_playtime_minutes: Optional[float] = None
+    # session_end fields
+    sessions_count: Optional[int] = None
+    quit_screen: Optional[str] = None
+    quit_day: Optional[int] = None
+    money_on_quit: Optional[float] = None
+    end_fish_count: Optional[int] = None
+    end_tank_count: Optional[int] = None
+    end_unique_species_count: Optional[int] = None
+    unique_species_seen_count: Optional[int] = None
+    # milestone fields
+    milestone_id: Optional[str] = None
+    steam_achievement_id: Optional[str] = None
+    # snapshot / extra — catch-all for merged dicts
+    extra: Optional[Dict] = None
 
 # ==================== HELPERS ====================
 def hash_steam_id(steam_id: str) -> str:
@@ -176,17 +200,13 @@ def verify_twitch_signature(request_body: bytes, signature: str, message_id: str
     ).hexdigest()
     return hmac.compare_digest(expected_signature, signature)
 
-def forward_to_zapier(player_hash: str, achievement: str, day: int):
-    """Forward hashed event data to Zapier webhook"""
-    payload = {
-        "player_hash": player_hash,
-        "achievement": achievement,
-        "day": day
-    }
+def forward_to_zapier(player_hash: str, event: GameEvent):
+    payload = event.dict(exclude={"api_key", "steam_id"})
+    payload["player_hash"] = player_hash
     try:
         response = requests.post(ZAPIER_WEBHOOK_URL, json=payload, timeout=5)
         if response.status_code == 200:
-            print(f"[GameEvent] ✓ Forwarded to Zapier: {achievement} day {day}")
+            print(f"[GameEvent] ✓ Forwarded to Zapier: {event.achievement} day {event.day}")
         else:
             print(f"[GameEvent] ❌ Zapier returned {response.status_code}")
     except Exception as e:
@@ -427,14 +447,13 @@ async def eventsub_callback(
 
 @app.post("/game-event")
 async def game_event(event: GameEvent):
-    """Receive achievement event from Godot, hash the Steam ID, forward to Zapier"""
     if event.api_key != GAME_API_KEY:
         return {"error": "Unauthorized"}, 401
 
     player_hash = hash_steam_id(event.steam_id)
-    print(f"[GameEvent] achievement={event.achievement} day={event.day} hash={player_hash[:8]}...")
+    print(f"[GameEvent] event={event.event_name or event.achievement} day={event.day} hash={player_hash[:8]}...")
 
-    forward_to_zapier(player_hash, event.achievement, event.day)
+    forward_to_zapier(player_hash, event)
 
     return {"status": "ok"}
 
